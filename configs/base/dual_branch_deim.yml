@@ -1,0 +1,172 @@
+# 双分支DEIM基础配置
+# 用于多粒度目标检测（单株+群落）
+
+task: detection
+
+# 顶级模型配置
+model: DEIM
+criterion: DualBranchCriterion
+postprocessor: DualBranchPostProcessor
+
+use_focal_loss: True
+eval_spatial_size: [640, 640]
+checkpoint_freq: 5
+
+# DEIM模型组件配置
+# 可选编码器：
+# - HybridEncoder: 原始编码器（默认，向下兼容）
+# - DualBranchHybridEncoder: 双分支编码器（针对单株/群落优化）
+DEIM:
+  backbone: DINOv3STAs
+  encoder: DualBranchHybridEncoder  # 使用双分支编码器
+  decoder: DualBranchDEIMTransformer
+
+# 双分支编码器配置（可选，启用分支化特征融合）
+# 
+# 分阶段使用建议：
+# - Stage 1: use_weighted_fusion + use_global_context (先验证基础增强)
+# - Stage 2: + use_scale_gate (门控融合到shared)
+# - Stage 3: + use_feature_align (特征对齐)
+# - Stage 4: + use_branch_enhance + return_branch_features (完整双分支)
+#
+DualBranchHybridEncoder:
+  branch_fusion: True              # 总开关
+  
+  # Stage 1: 基础增强
+  use_weighted_fusion: True        # BiFPN加权融合
+  use_global_context: True         # 全局上下文
+  
+  # Stage 2: 门控增强
+  use_scale_gate: False            # 尺度感知门控
+  gate_fusion_mode: 'weighted'     # 门控融合模式
+  
+  # Stage 3: 特征对齐
+  use_feature_align: False         # DCN特征对齐
+  
+  # Stage 4: 分支特化
+  use_branch_enhance: False        # 分支特化增强
+  return_branch_features: False    # 返回分支特征
+  
+  # 高级选项
+  use_cross_scale_attn: False      # 跨尺度注意力
+  
+  # 模块参数
+  gate_reduction: 8
+  gcb_reduction: 16
+  dcn_kernel_size: 3
+  cross_scale_nhead: 4
+
+# 双分支解码器配置
+DualBranchDEIMTransformer:
+  # 基础参数
+  hidden_dim: 256
+  nhead: 8
+  dim_feedforward: 1024
+  dropout: 0.0
+  activation: 'relu'
+  num_levels: 3
+  num_points: 4
+  
+  # 查询数量配置
+  num_queries_individual: 200    # 单株分支查询数
+  num_queries_colony: 100        # 群落分支查询数
+  
+  # 解码器层数配置
+  num_layers_individual: 6       # 单株分支层数（更多层用于精细定位）
+  num_layers_colony: 4           # 群落分支层数
+  
+  # 评估层索引
+  eval_idx_individual: -1
+  eval_idx_colony: -1
+  
+  # 回归参数
+  reg_max: 32
+  reg_scale: 4.0
+  
+  # 去噪训练
+  num_denoising: 100
+  label_noise_ratio: 0.5
+  box_noise_scale: 1.0
+  
+  # 特性开关
+  aux_loss: True
+  cross_attn_method: 'default'
+  mlp_act: 'relu'
+  use_gateway: True
+  use_density_guidance: True     # 启用密度引导
+  share_cls_head: True           # 共享分类头
+  eps: 1.0e-2
+
+# 双分支匹配器配置
+DualBranchMatcher:
+  weight_dict:
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_giou: 2.0
+  use_focal_loss: False
+  alpha: 0.25
+  gamma: 2.0
+  size_threshold: 0.05           # 面积阈值：区分单株/群落
+  soft_assignment: True          # 软分配
+  overlap_threshold: 0.3         # 软分配重叠区域
+
+# 双分支损失函数配置
+DualBranchCriterion:
+  weight_dict:
+    loss_mal: 1.0
+    loss_bbox: 5.0
+    loss_giou: 2.0
+    loss_repulsion: 0.5
+    loss_type: 1.0
+    loss_density: 0.1
+  losses: ['mal', 'boxes']
+  alpha: 0.2
+  gamma: 2.0
+  reg_max: 32
+  
+  # 差异化权重
+  individual_loc_weight: 1.5     # 单株分支定位权重倍数
+  colony_cls_weight: 1.2         # 群落分支分类权重倍数
+  
+  # 重叠抑制
+  use_repulsion_loss: True
+  repulsion_weight: 0.5
+  
+  # 类型判别
+  use_type_loss: True
+  type_loss_weight: 1.0
+  
+  # 密度损失
+  use_density_loss: True
+  density_loss_weight: 0.1
+  
+  # 匹配器注入
+  matcher:
+    type: DualBranchMatcher
+    weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
+    # 注意：size_threshold 使用默认值，具体数据集应在各自配置中覆盖
+    size_threshold: 0.011183  # 默认使用较小的阈值
+    threshold_mode: 'fixed'
+    soft_assignment: True
+    overlap_threshold: 0.25
+
+# 双分支后处理器配置
+DualBranchPostProcessor:
+  num_top_queries: 300
+  nms_threshold_individual: 0.5
+  nms_threshold_colony: 0.3
+  # 注意：评估时使用较低阈值，让模型输出更多预测供COCO评估
+  # COCO评估会自动在不同置信度下计算AP，所以这里应该设低一些
+  score_threshold_individual: 0.001  # 降低阈值，让评估时有输出
+  score_threshold_colony: 0.001      # 降低阈值
+  suppress_overlap: True
+  overlap_iou_threshold: 0.7
+  output_type_label: True
+
+# 训练配置
+epoches: 100
+lrsheduler: flatcosine
+lr_gamma: 0.5
+warmup_iter: 2000
+flat_epoch: 50
+no_aug_epoch: 10

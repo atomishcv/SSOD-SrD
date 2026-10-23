@@ -1,0 +1,145 @@
+# 使用RGB+HSV增强的配置文件示例
+# 在transforms中添加ExtractHSV和NormalizeImageDict
+
+%YAML 1.1
+---
+_base_: base/deimv2.yml
+
+task: detection  # 🔥 添加task字段
+
+model: DEIM
+criterion: DEIMCriterion
+output_dir: ./outputs/deimv2_dinov3_x_dji_hsv
+
+DEIM:
+  decoder: DEIMTransformer
+  encoder: HybridEncoder
+  backbone: DINOv3STAs
+
+DEIMTransformer:
+  num_classes: 2
+  hidden_dim: 256
+  num_queries: 300
+  nheads: 8
+  num_encoder_layers: 6
+  num_decoder_layers: 6
+  dim_feedforward: 2048
+  dropout: 0.0
+  activation: relu
+  normalize_before: False
+  return_intermediate_dec: True
+  query_dim: 4
+  bbox_embed_type: linear
+  num_feature_levels: 3
+  nms_iou_threshold: -1
+  num_classes: 2
+
+HybridEncoder:
+  hidden_dim: 256
+  nhead: 8
+  num_encoder_layers: 3
+  dim_feedforward: 1024
+  dropout: 0.0
+  activation: relu
+  normalize_before: False
+  num_feature_levels: 3
+
+DINOv3STAs:
+  name: dinov3_vitb14
+  weights_path: null
+  interaction_indexes: [2, 5, 8, 11]
+  finetune: True
+  embed_dim: 768
+  num_heads: 12
+  patch_size: 14
+  use_sta: True
+  conv_inplane: 16
+  hidden_dim: 256
+
+DEIMCriterion:
+  num_classes: 2
+  matcher:
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_giou: 2.0
+  weight_dict:
+    loss_ce: 2.0
+    loss_bbox: 5.0
+    loss_giou: 2.0
+  losses: ['labels', 'boxes']
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+# 数据集配置
+dataset: dji_detection
+
+# 优化器配置
+optimizer:
+  type: AdamW
+  lr: 0.0001
+  betas: [0.9, 0.999]
+  weight_decay: 0.000125
+
+# Training epochs
+epoches: 150
+
+## Our LR-Scheduler
+flat_epoch: 75
+no_aug_epoch: 15
+
+## Our DataAug with RGB + HSV (分离为两个独立字段)
+## 方案：数据加载器返回 {'rgb': tensor, 'hsv': tensor} 字典
+## 模型使用RGB输入，HSV作为独立字段保存供后续使用
+train_dataloader:
+  dataset: 
+    transforms:
+      ops:
+        - {type: Mosaic, output_size: 400, rotation_range: 15, translation_range: [0.15, 0.15], scaling_range: [0.4, 1.6],
+           probability: 1.0, fill_value: 0, use_cache: True, max_cached_images: 50, random_pop: True}
+        - {type: RandomPhotometricDistort, p: 0.7}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.5}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [800, 800], }
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}  # RGB [0,1]
+        # 🔥 提取HSV，返回字典 {'rgb': tensor, 'hsv': tensor}
+        - {type: ExtractHSV, normalize_hsv: False}
+        # 🔥 对RGB和HSV分别进行归一化
+        - {type: NormalizeImageDict, 
+           rgb_mean: [0.485, 0.456, 0.406], rgb_std: [0.229, 0.224, 0.225],
+           hsv_mean: [0.5, 0.5, 0.5], hsv_std: [0.5, 0.5, 0.5]}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: [4, 75, 150]
+
+  collate_fn:
+    base_size: 800
+    mixup_prob: 0.3
+    ema_restart_decay: 0.9999
+    base_size_repeat: 20
+    mixup_epochs: [4, 75]
+    stop_epoch: 150
+    copyblend_epochs: [4, 150]
+
+  shuffle: True
+  total_batch_size: 2
+  num_workers: 4
+
+val_dataloader:
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [800, 800], }
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}  # RGB [0,1]
+        # 🔥 提取HSV，返回字典 {'rgb': tensor, 'hsv': tensor}
+        - {type: ExtractHSV, normalize_hsv: False}
+        # 🔥 对RGB和HSV分别进行归一化
+        - {type: NormalizeImageDict, 
+           rgb_mean: [0.485, 0.456, 0.406], rgb_std: [0.229, 0.224, 0.225],
+           hsv_mean: [0.5, 0.5, 0.5], hsv_std: [0.5, 0.5, 0.5]}
+  shuffle: False
+  total_batch_size: 2
+  num_workers: 4
+

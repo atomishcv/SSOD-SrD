@@ -1,0 +1,89 @@
+task: ssod
+
+evaluator:
+  type: CocoEvaluator
+  iou_types: ['bbox', ]
+
+num_classes: 80
+remap_mscoco_category: True
+
+train_dataloader: 
+  type: DataLoader
+  dataset: 
+    type: CocoSemiLabeled
+    root: /data/usb/coco/
+    img_folder_name: train2017
+    semi_ann_dir: annotations/semi_supervised
+    semi_name: instances_train2017.1@10.json
+    tag: sup
+    return_masks: False
+    transforms:
+      type: Compose
+      ops: ~
+  shuffle: True
+  num_workers: 4
+  drop_last: True 
+  collate_fn:
+    type: BatchImageCollateFunction
+
+
+val_dataloader:
+  type: DataLoader
+  dataset: 
+    type: CocoDetection
+    img_folder: /data/usb/coco/val2017/
+    ann_file: /data/usb/coco/annotations/instances_val2017.json
+    return_masks: False
+    transforms:
+      type: Compose
+      ops: ~ 
+  shuffle: False
+  num_workers: 2  # 降低以避免验证阶段数据加载卡死
+  drop_last: False
+  persistent_workers: False  # 验证阶段不保持 worker 进程，避免资源泄露
+  collate_fn:
+    type: BatchImageCollateFunction
+
+
+# Unlabeled dataloader for SSOD (teacher-view list json)
+unlabeled_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoSemiUnlabeled
+    root: /data/usb/coco/
+    img_folder_name: train2017
+    use_image_info: True
+    image_list_ann: /data/usb/coco/annotations/semi_supervised/instances_train2017.1@10-unlabeled.json
+    tag: unsup_teacher
+    transforms:
+      type: Compose
+      ops:
+        - {type: Resize, size: [640, 640]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+  shuffle: True
+  total_batch_size: 8
+  num_workers: 4
+  drop_last: True
+  collate_fn:
+    type: BatchImageCollateFunction
+unlabeled_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoSemiUnlabeled
+    root: /data/usb/coco/
+    img_folder_name: /data/usb/coco/train2017/
+    use_image_info: True
+    image_info_ann: /data/usb/coco/annotations/semi_supervised/instances_train2017.1@10.json
+    transforms:
+      type: Compose
+      ops:
+        - {type: Resize, size: [640, 640]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+  shuffle: True
+  total_batch_size: 8
+  num_workers: 4
+  drop_last: True
+  collate_fn:
+    type: BatchImageCollateFunction

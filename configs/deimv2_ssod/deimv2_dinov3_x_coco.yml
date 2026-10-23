@@ -1,0 +1,223 @@
+__include__: [
+  '../dataset/dji_detection_ssod.yml',  # 🔥 修改：使用DJI数据集（单类别）而非COCO（80类别）
+  '../runtime.yml',
+  '../base/dataloader.yml',
+  '../base/optimizer.yml',
+  '../base/deimv2_ssod.yml',
+]
+
+
+output_dir: ./outputs/deimv2_dinov3_x_dji_ssod
+
+# 🔥 DDP 设置：启用未使用参数检测（半监督训练中某些参数可能在部分 forward 中不使用）
+# 多次 forward（sup + unsup）场景下，find_unused_parameters=True 容易触发 DDP
+# “Expected to mark a variable ready only once”错误；本训练每个 iter 都有 sup 分支，
+# 参数不会 truly unused，因此关闭更稳定。
+find_unused_parameters: True
+
+# ========== 半监督训练参数（基于 Iteration，参考 Semi-DETR 120k）==========
+# 🔥 策略调整（完全对齐 Semi-DETR 120k 配置）：
+#     1. 总 iteration 数：120000（与 Semi-DETR 120k 对齐）
+#     2. 无监督权重：4.0（与 Semi-DETR unsup_weight=4.0 对齐）
+#     3. 无监督权重 warmup：12000 iterations（线性增加，Semi-DETR 风格）
+#        - Semi-DETR 公式：weight = weight * (step - 1) / warmup
+#     4. One-to-Many 匹配阶段：60000 iterations（总 iteration 的 50%）
+#     5. 训练阶段划分（基于 iteration）：
+#        - 阶段 1 (0-12000 iter): 无监督权重 0 → 4.0（线性增加），One-to-Many 匹配
+#        - 阶段 2 (12000-60000 iter): 无监督权重 4.0（固定），One-to-Many 匹配
+#        - 阶段 3 (60000-120000 iter): 无监督权重 4.0（固定），One-to-One 匹配
+# pretrain_model_path: /data/DEIMv2/outputs/deimv2_dinov3_x_dji_800/best_stg1.pth        # 🔥 使用预训练模型
+
+# ========== Semi-DETR 超参数（基于 Iteration）==========
+# 🔥 参考 Semi-DETR 120k 配置，所有参数基于 iteration 而非 epoch
+# 目标总 iteration: 120000（与 Semi-DETR 120k 对齐）
+ssl_total_iters: 120000          # 🔥 目标总 iteration 数（Semi-DETR 120k 标准）
+ssl_sample_ratio: [1, 4]         # 🔥 Semi-DETR 风格采样比例：标注:无标注 = 1:4
+ssl_lambda_u: 2.0                # 🔥 无监督损失权重（Semi-DETR 默认 4.0）
+ssl_warmup_iters: 24000          # 🔥 延长 warmup（从 12000 增加到 24000，即总 iteration 的 20%）
+                                 #    Semi-DETR 风格：weight = weight * (step - 1) / warmup
+                                 #    更长的 warmup 让 teacher 模型更稳定
+ssl_ema_momentum: 0.9990         # 🔥 提高 EMA 动量（从 0.999 增加到 0.9996，更慢的 teacher 更新）
+ssl_ema_warmup: 2000             # 🔥 EMA warmup（前 2000 iter EMA 动量逐渐增加）
+
+# 伪标签过滤参数
+conf_thresh: 0.4                 # 🔥 进一步提高置信度阈值（从 0.5 增加到 0.7，确保伪标签质量）
+ssl_pseudo_nms_iou: 0.5          # NMS IoU阈值（0=禁用NMS）
+
+# 🔥 无监督损失稳定性参数
+ssl_loss_clip: 50.0              # 🔥 降低无监督损失截断阈值（从 100 降到 50，更严格的保护）
+
+# ========== 🔥 Semi-DETR 三大核心模块 ==========
+# 1. Stage-wise Hybrid Matching（分阶段混合匹配）
+ssl_use_hybrid_matching: True    # 🔥 启用混合匹配
+ssl_hybrid_topk: 13              # 一对多匹配时每个 GT 分配的 query 数量（Semi-DETR 默认 13）
+
+# 2. EXG 植被指数筛选
+ssl_use_exg_filter: True    # 🔥 启用 EXG 筛选
+ssl_exg_thresh: 17.0        # EXG 阈值
+
+# 3. Cross-view Query Consistency（跨视图查询一致性）
+ssl_consistency_weight: 2.0      # 🔥 一致性损失权重（降低以稳定训练，原 Semi-DETR 10.0）
+ssl_consistency_type: 'semi_detr'
+
+# 🔥 关键优化：Semi-DETR warm-up 步数（基于 Iteration）
+# 参考 Semi-DETR 120k 配置：warm_up_step = 总 iteration 的 50% = 60000
+#       前 60000 iter：使用 One-to-Many 匹配（加速收敛）
+#       后 60000 iter：使用 One-to-One 匹配（提升精度）
+ssl_warm_up_step: 60000          # 🔥 One-to-Many 匹配阶段（总 iteration 的 50%，与 Semi-DETR 对齐）
+                                 #    确保 warmup_iters (12000) < warm_up_step (60000) < total_iters (120000)
+
+# 🔥 更新eval_spatial_size匹配新的输入分辨率
+eval_spatial_size: [800, 800]  # h w，使用 800×800 提升小目标检测能力
+
+DEIM:
+  backbone: DINOv3STAs
+
+DINOv3STAs:
+  name: dinov3_vits16plus
+  weights_path: ./ckpts/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
+  interaction_indexes: [5,8,11]   # only need the [1/8, 1/16, 1/32]
+  finetune: True
+  conv_inplane: 64
+  hidden_dim: 256
+  
+HybridEncoder:
+  in_channels: [256, 256, 256]
+  # intra
+  hidden_dim: 256
+  dim_feedforward: 1024
+
+  # cross 
+  expansion: 1.25
+  depth_mult: 1.37
+  
+  # 🔥 前景注意力增强（已禁用）
+  enable_fg_attention: False
+
+  # 🔥 HSV双分支特征融合
+  use_hsv_branch: True           # 启用HSV分支
+  hsv_hidden_dim: 64             # HSV分支隐藏维度（轻量级）
+  hsv_fusion_type: 'attention'   # 融合方式: 'add', 'cat', 'attention'
+
+DEIMTransformer:
+  num_classes: 2  # 🔥 两个类别：0=small, 1=big
+  num_layers: 6
+  eval_idx: -1
+  feat_channels: [256, 256, 256]
+  # reg_scale: 8
+  hidden_dim: 256
+  dim_feedforward: 2048
+
+PostProcessor:
+  num_top_queries: 100  # 🔥 减少查询数量从300到100，降低低质量预测框的FP
+
+## Optimizer
+optimizer:
+  type: AdamW
+
+  params: 
+    -
+      # except norm/bn/bias in self.dinov3
+      params: '^(?=.*.dinov3)(?!.*(?:norm|bn|bias)).*$'  
+      lr: 0.0000125  # 🔥 降低backbone学习率，与全监督一致（从0.00001降低到0.000001）
+    -
+      # including all norm/bn/bias in self.dinov3
+      params: '^(?=.*.dinov3)(?=.*(?:norm|bn|bias)).*$'    
+      lr: 0.0000125  # 🔥 降低backbone学习率，与全监督一致（从0.00001降低到0.000001）
+      weight_decay: 0.
+    - 
+      # including all norm/bn/bias except for the self.dinov3
+      params: '^(?=.*(?:sta|encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+
+  lr: 0.0001  # 🔥 降低主学习率，与全监督一致（从0.0005降低到0.0001，避免学习率过大导致不稳定）
+  betas: [0.9, 0.999]
+  weight_decay: 0.000125  # 🔥 与全监督一致
+
+# 🔥 更强的梯度裁剪（防止无监督损失导致的梯度爆炸）
+clip_max_norm: 0.01              # 🔥 从默认 0.1 降低到 0.01，更激进的梯度裁剪
+
+# Training epochs（基于 Iteration 自动计算）
+# 🔥 参考 Semi-DETR 120k 配置：总 iteration = 120000
+# 假设每个 epoch ≈ 371 iterations（batch_size=8），则需要的 epoch 数 = 120000 / 371 ≈ 323
+# 实际 epoch 数会在训练时根据实际 dataloader 长度自动计算
+# 注意：epoch 数会根据实际数据集大小调整，但总 iteration 数固定为 120000
+epoches: 323  # 🔥 基于目标总 iteration (120000) 和估算的 iter/epoch (371) 计算：120000/371≈323
+
+## LR-Scheduler（基于 Iteration 的学习率调度策略）
+lrsheduler: flatcosine  # 使用 flat-cosine 学习率调度
+lr_gamma: 0.1           # cosine 衰减到最小比例
+warmup_iter: 2000       # 🔥 LR warmup iteration（总 iteration 的 1.67%，120000 * 0.0167 ≈ 2000）
+flat_epoch: 242          # 🔥 延迟学习率衰减时间点（总 iteration 的 75%，120000 * 0.75 / 371 ≈ 242 epoch）
+                         #    对应 iteration: 242 * 371 ≈ 89782 iter（总 iteration 的 75%）
+no_aug_epoch: 32         # 🔥 数据增强停止时间点（总 iteration 的 10%，120000 * 0.1 / 371 ≈ 32 epoch）
+                         #    对应 iteration: 32 * 371 ≈ 11872 iter（总 iteration 的 10%）
+
+## Our DataAug（禁用 Mosaic/MixUp，使用基础增强）
+# 🔥 问题诊断：
+#    - 全监督用 100% 标注数据 + Mosaic 可以达到 58%
+#    - 半监督只用 10% 标注数据，Mosaic 会导致有效标签更少
+#    - 单类别场景下 Mosaic/MixUp 效果差
+train_dataloader:
+  total_batch_size: 3  # 🔥 必须能被 GPU 数量整除（3 GPUs: 3/3=1 per GPU）
+  num_workers: 4       # 🔥 恢复多进程数据加载
+  persistent_workers: True
+  pin_memory: True
+  dataset: 
+    transforms:
+      ops:
+        # 🔥 禁用 Mosaic，使用基础数据增强
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.5}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [800, 800]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: [4, 75, 150]   # 🔥 数据增强策略切换点
+
+  collate_fn:
+    base_size: 800
+    mixup_prob: 0.0   # 🔥 禁用 MixUp
+    ema_restart_decay: 0.9999
+    base_size_repeat: 20
+    mixup_epochs: [4, 75]
+    stop_epoch: 150
+    copyblend_epochs: [4, 150]
+    copyblend_prob: 0.0   # 🔥 禁用 CopyBlend
+
+val_dataloader:
+  total_batch_size: 3  # 🔥 必须能被 GPU 数量整除（3 GPUs: 3/3=1 per GPU）
+  num_workers: 2  # 🔥 验证阶段适中worker
+  persistent_workers: False  # 验证阶段不保持worker（避免占用资源）
+  pin_memory: True
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [800, 800], }  # 🔥 使用800×800分辨率提升小目标检测
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+
+DEIMCriterion:
+  num_classes: 2  # 🔥 两个类别：0=small, 1=big
+  weight_dict: {loss_mal: 1, loss_bbox: 5, loss_giou: 2, loss_fgl: 0.15, loss_ddf: 1.5}
+  losses: ['mal', 'boxes', 'local']
+  # 🔥 优化focal loss参数，改善分类分数校准
+  alpha: 0.6  # 从0.5调整到0.6，更平衡正负样本
+  gamma: 2.0  # 从2.5降低到2.0，减少早期梯度不稳定，改善分布校准
+  reg_max: 32
+
+  matcher:
+    type: HungarianMatcher
+    # 🔥 优化匹配代价权重
+    weight_dict: {cost_class: 3.0, cost_bbox: 5.0, cost_giou: 2.0}
+    alpha: 0.5  # 🔥 单类别优化：从默认0.25增加到0.5
+    gamma: 2.0  # 🔥 从2.5降低到2.0，与criterion保持一致
+    # change matcher
+    change_matcher: True
+    iou_order_alpha: 4.0
+    matcher_change_epoch: 120  # 🔥 调整匹配器切换epoch（对应150 epoch的80%）

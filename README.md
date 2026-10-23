@@ -51,4 +51,3 @@ python train_ssod.py -c configs/ssod/deim_ssod_dji.yml
 ## 许可与致谢
 
 根目录 `LICENSE` 保留了 DEIMv2 项目的 Apache 2.0 许可。`dinov3/` 中保留了其独立许可和说明。请在使用或再发布相关代码时遵守各自许可。感谢 DEIMv2、DINOv3 和相关开源项目的作者。
-

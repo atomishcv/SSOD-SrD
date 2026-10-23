@@ -1,0 +1,32 @@
+__include__: ['../dataset/coco_detection_ssod.yml', '../runtime.yml', '../base/dataloader.yml', '../base/optimizer.yml', '../base/deimv2_ssod.yml']
+
+# ========== 超级稳定训练配置 ==========
+# 学习率降低 80%（从 0.00025 → 0.00005）
+optimizer:
+  type: AdamW
+  params:
+    - params: '^(?=.*.dinov3)(?!.*(?:norm|bn|bias)).*$'
+      lr: 0.00005  # Backbone: 降低 80%
+    - params: '^(?=.*.dinov3)(?=.*(?:norm|bn|bias)).*$'
+      lr: 0.00005
+      weight_decay: 0.
+    - params: '^(?=.*(?:sta|encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+  lr: 0.00005  # Decoder: 降低 80%
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+# Warmup 延长到 5000 步（约 1.7 个 epoch）
+lr_warmup_scheduler:
+  type: LinearWarmup
+  warmup_duration: 5000
+
+# 更强的梯度裁剪（0.05 → 0.01）
+clip_max_norm: 0.01
+
+# 关闭混合精度训练
+use_amp: False
+
+# 输出目录
+output_dir: './outputs/deimv2_dinov3_s_coco_ultra_stable'
+

@@ -1,0 +1,206 @@
+# 双分支DEIM配置 - DINOv3-X骨干 - DJI数据集
+# 用于多粒度目标检测（单株+群落）
+
+__include__: [
+  '../dataset/dji_detection.yml',
+  '../runtime.yml',
+  '../base/dataloader.yml',
+  '../base/dual_branch_deim.yml',
+  '../base/optimizer.yml',
+]
+
+output_dir: ./outputs/dual_branch_dinov3_x_dji
+
+# DINOv3骨干配置 (参考 deimv2_dinov3_x_dji.yml)
+DINOv3STAs:
+  name: dinov3_vits16plus
+  weights_path: ./ckpts/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
+  interaction_indexes: [5, 8, 11]
+  finetune: True
+  conv_inplane: 64
+  hidden_dim: 256
+
+# 双分支混合编码器配置（继承自 HybridEncoder）
+# 
+# 分阶段使用建议：
+# - Stage 1 (基础增强): use_weighted_fusion + use_global_context
+# - Stage 2 (门控增强): + use_scale_gate
+# - Stage 3 (特征对齐): + use_feature_align (需确认DCN可用)
+# - Stage 4 (分支特化): + use_branch_enhance + return_branch_features (需配合双头decoder)
+#
+# 当前配置：Stage 1 (推荐先用这个验证基础增强效果)
+#
+DualBranchHybridEncoder:
+  # ============ 基础参数（与 HybridEncoder 相同） ============
+  in_channels: [256, 256, 256]
+  feat_strides: [8, 16, 32]
+  hidden_dim: 256
+  nhead: 8
+  dim_feedforward: 1024
+  dropout: 0.0
+  enc_act: 'gelu'
+  use_encoder_idx: [2]
+  num_encoder_layers: 1
+  pe_temperature: 10000
+  expansion: 1.25
+  depth_mult: 1.37
+  act: 'silu'
+  eval_spatial_size: [640, 640]
+  version: 'deim'
+  fuse_op: 'sum'
+  
+  # ============ 增强模块配置 ============
+  # 注意：由于出现NaN问题，暂时关闭所有增强模块
+  branch_fusion: False             # 总开关 - 关闭后使用原始HybridEncoder
+  
+  # Stage 1: 基础增强 (暂时关闭)
+  use_weighted_fusion: False       # BiFPN加权融合
+  use_global_context: False        # 全局上下文 (GCNet)
+  
+  # Stage 2: 门控增强 (确认Stage1稳定后开启)
+  use_scale_gate: False            # 尺度感知门控 (门控直接作用到shared特征)
+  gate_fusion_mode: 'weighted'     # 门控融合模式: weighted/max/sum
+  
+  # Stage 3: 特征对齐 (可选，需验证DCN可用性)
+  use_feature_align: False         # DCN特征对齐
+  
+  # Stage 4: 分支特化 (需配合双头decoder)
+  use_branch_enhance: False        # 分支特化增强
+  return_branch_features: False    # 返回分支特征 (需要decoder支持)
+  
+  # 高级选项 (计算量大，谨慎开启)
+  use_cross_scale_attn: False      # 跨尺度注意力
+  
+  # ============ 模块参数 ============
+  gate_reduction: 8                # 门控模块通道压缩比
+  gcb_reduction: 16                # 全局上下文模块压缩比
+  dcn_kernel_size: 3               # 可变形卷积核大小
+  cross_scale_nhead: 4             # 跨尺度注意力头数
+
+# 双分支解码器配置（覆盖基础配置）
+DualBranchDEIMTransformer:
+  feat_channels: [256, 256, 256]
+  feat_strides: [8, 16, 32]
+  hidden_dim: 256
+  nhead: 8
+  dim_feedforward: 2048
+  
+  # 针对DJI数据集的查询配置
+  num_queries_individual: 200    # 单株分支
+  num_queries_colony: 100        # 群落分支
+  
+  # 层数配置
+  num_layers_individual: 6
+  num_layers_colony: 4
+  
+  eval_spatial_size: [640, 640]
+  num_denoising: 100
+  aux_loss: True
+  use_density_guidance: True
+
+# 双分支匹配器配置（针对DJI数据集调整）
+# 
+# 基于全局数据集分析结果:
+#   - 总标注数: 4637
+#   - 小目标簇: 2885个 (62.2%), 均值面积: 0.0045
+#   - 大目标簇: 1752个 (37.8%), 均值面积: 0.0634
+#   - K-Means建议阈值: 0.011183
+#   - 75%分位数阈值: 0.019751
+#   - 90%分位数阈值: 0.057466
+#
+DualBranchMatcher:
+  weight_dict:
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_giou: 2.0
+  
+  # 阈值配置 - 三种模式可选:
+  # 'fixed': 使用下面的 size_threshold 固定值（基于数据集预分析）
+  # 'percentile': 训练时基于累积统计的百分位数
+  # 'adaptive': 训练过程中自适应调整（基于双峰分析）
+  threshold_mode: 'fixed'         # 推荐使用预分析的固定阈值
+  
+  # 基于K-Means聚类分析的阈值（两簇边界）
+  size_threshold: 0.011183        # 小于此为单株，大于此为群落
+  
+  threshold_percentile: 75.0      # percentile模式：使用75%分位数
+  adaptive_warmup_samples: 1000   # adaptive模式：收集1000个样本后计算阈值
+  adaptive_ema_momentum: 0.99     # adaptive模式：EMA更新动量
+  
+  soft_assignment: True           # 允许边界目标同时匹配两个分支
+  overlap_threshold: 0.25         # 软分配的重叠区域（阈值±25%范围内的目标可匹配两分支）
+
+# 双分支损失函数配置
+DualBranchCriterion:
+  weight_dict:
+    loss_mal: 1.0
+    loss_bbox: 5.0
+    loss_giou: 2.0
+    loss_repulsion: 0.5
+    loss_type: 1.0
+    loss_density: 0.1
+  losses: ['mal', 'boxes']
+  individual_loc_weight: 1.5
+  colony_cls_weight: 1.2
+  use_repulsion_loss: True
+  use_type_loss: True
+  use_density_loss: True
+
+# 优化器配置（参考 deimv2_dinov3_x_dji.yml）
+optimizer:
+  type: AdamW
+
+  params: 
+    -
+      # except norm/bn/bias in self.dinov3
+      params: '^(?=.*.dinov3)(?!.*(?:norm|bn|bias)).*$'  
+      lr: 0.00001
+    -
+      # including all norm/bn/bias in self.dinov3
+      params: '^(?=.*.dinov3)(?=.*(?:norm|bn|bias)).*$'    
+      lr: 0.00001
+      weight_decay: 0.
+    - 
+      # including all norm/bn/bias except for the self.dinov3
+      params: '^(?=.*(?:sta|encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+
+  lr: 0.0005
+  betas: [0.9, 0.999]
+  weight_decay: 0.000125
+
+# 训练配置
+epoches: 132
+flat_epoch: 64
+no_aug_epoch: 12
+clip_max_norm: 0.05  # 降低梯度裁剪阈值，防止NaN
+use_ema: True
+ema_decay: 0.9999
+ema_warmups: 2000
+
+# 数据增强配置 - 简化版本，避免GT丢失
+train_dataloader:
+  dataset: 
+    transforms:
+      ops:
+        # 简单的数据增强，不使用Mosaic和RandomIoUCrop
+        - {type: RandomPhotometricDistort, p: 0.5}
+        - {type: RandomHorizontalFlip, p: 0.5}
+        - {type: Resize, size: [640, 640]}
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+
+  collate_fn:
+    type: BatchImageCollateFunction
+
+val_dataloader:
+  dataset:
+    transforms:
+      ops:
+        - {type: Resize, size: [640, 640]}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+

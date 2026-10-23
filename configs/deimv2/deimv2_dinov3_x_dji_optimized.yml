@@ -1,0 +1,154 @@
+__include__: [
+  '../dataset/dji_detection.yml',
+  '../runtime.yml',
+  '../base/dataloader.yml',
+  '../base/optimizer.yml',
+  '../base/deimv2.yml',
+]
+
+task: detection  # 🔥 添加task字段
+
+output_dir: ./outputs/deimv2_dinov3_x_dji_optimized
+
+# 🔥 更新eval_spatial_size匹配新的输入分辨率
+eval_spatial_size: [800, 800]  # h w，从640×640扩大到800×800
+
+DEIM:
+  backbone: DINOv3STAs
+
+DINOv3STAs:
+  name: dinov3_vits16plus
+  weights_path: ./ckpts/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
+  interaction_indexes: [5,8,11]   # only need the [1/8, 1/16, 1/32]
+  finetune: True
+  conv_inplane: 64
+  hidden_dim: 256
+
+HybridEncoder:
+  in_channels: [256, 256, 256]
+  # intra
+  hidden_dim: 256
+  dim_feedforward: 1024
+
+  # cross 
+  expansion: 1.25
+  depth_mult: 1.37
+  
+  # 🔥 前景注意力增强（已禁用）
+  enable_fg_attention: False
+  
+  # 🔥 HSV双分支特征融合
+  use_hsv_branch: True           # 启用HSV分支
+  hsv_hidden_dim: 64             # HSV分支隐藏维度（轻量级）
+  hsv_fusion_type: 'attention'   # 融合方式: 'add', 'cat', 'attention'
+
+DEIMTransformer:
+  num_layers: 6
+  eval_idx: -1
+  feat_channels: [256, 256, 256]
+  # reg_scale: 8
+  hidden_dim: 256
+  dim_feedforward: 2048
+
+PostProcessor:
+  num_top_queries: 100  # 🔥 减少查询数量从300到100，降低低质量预测框的FP（False Positive）
+
+## Optimizer
+optimizer:
+  type: AdamW
+
+  params: 
+    -
+      # except norm/bn/bias in self.dinov3
+      params: '^(?=.*.dinov3)(?!.*(?:norm|bn|bias)).*$'  
+      lr: 0.000001  # 🔥 进一步降低backbone学习率，避免早期表示不稳定（从0.000005降低到0.000001）
+    -
+      # including all norm/bn/bias in self.dinov3
+      params: '^(?=.*.dinov3)(?=.*(?:norm|bn|bias)).*$'    
+      lr: 0.000001  # 🔥 进一步降低backbone学习率，避免早期表示不稳定（从0.000005降低到0.000001）
+      weight_decay: 0.
+    - 
+      # including all norm/bn/bias except for the self.dinov3
+      params: '^(?=.*(?:sta|encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+
+  lr: 0.0001  # 🔥 降低主学习率，改善分类分数校准（从0.0002降低到0.0001，避免低质量高分预测）
+  betas: [0.9, 0.999]
+  weight_decay: 0.000125
+
+# Training epochs
+epoches: 300  # 🔥 延长训练周期以充分收敛
+
+## Our LR-Scheduler
+flat_epoch: 75    # 🔥 调整学习率衰减时间点（对应150 epoch的50%）
+no_aug_epoch: 15  # 🔥 调整数据增强停止时间点（对应150 epoch的10%）
+
+## Our DataAug
+## HSV在dataset层面计算（load_item之后），然后与RGB一起经过transforms处理
+train_dataloader:
+  dataset:
+    # 🔥 在dataset层面启用HSV返回
+    return_hsv: True
+    hsv_mean: [0.5, 0.5, 0.5]
+    hsv_std: [0.5, 0.5, 0.5]
+    transforms:
+      ops:
+        # 🔥 单类别优化：增强Mosaic数据增强（调整output_size匹配新分辨率）
+        - {type: Mosaic, output_size: 400, rotation_range: 15, translation_range: [0.15, 0.15], scaling_range: [0.4, 1.6],
+           probability: 1.0, fill_value: 0, use_cache: True, max_cached_images: 50, random_pop: True}  # output_size从320调整到400匹配800分辨率
+        - {type: RandomPhotometricDistort, p: 0.7}  # 🔥 从0.5增加到0.7
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.5}  # 🔥 降低IoUCrop概率从0.9到0.5，减少数据增强强度，避免破坏小目标
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: RandomHorizontalFlip}
+        - {type: Resize, size: [800, 800], }  # 🔥 扩大分辨率从640到800，提升小目标检测能力（原始影像1024×1024）
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        # 🔥 只对RGB进行标准归一化，HSV在dataset层面单独处理
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      policy:
+        epoch: [4, 75, 150]   # 🔥 调整数据增强策略切换点（对应150 epoch）
+
+  collate_fn:
+    base_size: 800  # 🔥 扩大base_size匹配新的输入分辨率
+    mixup_prob: 0.3  # 🔥 降低MixUp概率从0.7到0.3，减少数据增强强度，避免破坏小目标
+    ema_restart_decay: 0.9999
+    base_size_repeat: 20
+    mixup_epochs: [4, 75]  # 🔥 调整MixUp使用epoch（对应150 epoch）
+    stop_epoch: 150  # 🔥 调整停止epoch
+    copyblend_epochs: [4, 150]  # 🔥 调整CopyBlend使用epoch（对应150 epoch）
+
+val_dataloader:
+  dataset:
+    # 🔥 在dataset层面启用HSV返回
+    return_hsv: True
+    hsv_mean: [0.5, 0.5, 0.5]
+    hsv_std: [0.5, 0.5, 0.5]
+    transforms:
+      ops:
+        - {type: Resize, size: [800, 800], }  # 🔥 扩大验证分辨率从640到800，匹配训练分辨率
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        # 🔥 只对RGB进行标准归一化，HSV在dataset层面单独处理
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+
+DEIMCriterion:
+  weight_dict: {loss_mal: 1, loss_bbox: 5, loss_giou: 2, loss_fgl: 0.15, loss_ddf: 1.5}
+  losses: ['mal', 'boxes', 'local']
+  # 🔥 优化focal loss参数，改善分类分数校准
+  alpha: 0.6  # 从0.5调整到0.6，更平衡正负样本（避免过度关注正样本导致分数校准差）
+  gamma: 2.0  # 从2.5降低到2.0，减少早期梯度不稳定，改善分布校准
+  reg_max: 32
+
+  matcher:
+    type: HungarianMatcher
+    # 🔥 优化匹配代价权重
+    weight_dict: {cost_class: 3.0, cost_bbox: 5.0, cost_giou: 2.0}  # cost_class从2.0增加到3.0
+    alpha: 0.5  # 🔥 单类别优化：从默认0.25增加到0.5
+    gamma: 2.0  # 🔥 从2.5降低到2.0，与criterion保持一致，减少早期不稳定
+    # change matcher
+    change_matcher: True
+    iou_order_alpha: 4.0
+    matcher_change_epoch: 120  # 🔥 调整匹配器切换epoch（对应150 epoch的80%）
+
+

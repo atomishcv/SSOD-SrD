@@ -1,0 +1,46 @@
+task: detection
+
+evaluator:
+  type: CocoEvaluator
+  iou_types: ['bbox', ]
+
+num_classes: 2  # 2个类别：0=small, 1=big
+remap_mscoco_category: False
+
+# 使用两个类别的数据集：
+# - train_full_two_categories.json: 包含small和big两个类别
+# - category_id: 0=small, 1=big
+
+train_dataloader: 
+  type: DataLoader
+  dataset: 
+    type: CocoDetection
+    img_folder: /data/DEIMv2/DJI_dataset/images/
+    ann_file: /data/DEIMv2/DJI_dataset/annotations/train_full_two_categories.json
+    return_masks: False
+    transforms:
+      type: Compose
+      ops: ~
+  shuffle: True
+  num_workers: 4
+  drop_last: True 
+  collate_fn:
+    type: BatchImageCollateFunction
+
+
+val_dataloader:
+  type: DataLoader
+  dataset: 
+    type: CocoDetection
+    img_folder: /data/DEIMv2/DJI_dataset/images/
+    ann_file: /data/DEIMv2/DJI_dataset/annotations/val_full_two_categories.json  
+    return_masks: False
+    transforms:
+      type: Compose
+      ops: ~ 
+  shuffle: False
+  num_workers: 4
+  drop_last: False
+  collate_fn:
+    type: BatchImageCollateFunction
+

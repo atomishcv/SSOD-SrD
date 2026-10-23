@@ -1,0 +1,126 @@
+__include__: [
+  '../dataset/coco_detection_ssod.yml',
+  '../runtime.yml',
+  '../base/dataloader.yml',
+  '../base/optimizer.yml',
+  '../base/deimv2_ssod.yml',
+]
+
+output_dir: ./outputs/deimv2_dinov3_s_coco_lowmem
+
+# 半监督超参
+ssl_lambda_u: 1.0          # 无监督损失权重
+ssl_pseudo_score_thresh: 0.7
+ssl_pseudo_nms_iou: 0.5
+
+DEIM:
+  backbone: DINOv3STAs
+
+DINOv3STAs:
+  name: vit_tiny
+  embed_dim: 192
+  weights_path: ./ckpts/vitt_distill.pt
+  interaction_indexes: [5,8,11]   # only need the [1/8, 1/16, 1/32]
+  num_heads: 3
+
+HybridEncoder:
+  in_channels: [192, 192, 192]
+  depth_mult: 0.67
+  expansion: 0.34
+  hidden_dim: 192
+  dim_feedforward: 512
+
+DEIMTransformer:
+  feat_channels: [192, 192, 192]
+  hidden_dim: 192
+  dim_feedforward: 512
+  num_layers: 3  # ✅ 从 4 降到 3，减少显存
+  eval_idx: -1
+
+## ========== 超低显存优化 ==========
+optimizer:
+  type: AdamW
+
+  params: 
+    -
+      # except norm/bn/bias in self.dinov3
+      params: '^(?=.*.dinov3)(?!.*(?:norm|bn|bias)).*$'  
+      lr: 0.000025  # 降低学习率
+    -
+      # except norm/bn/bias in ^((?!dinov3).)*$
+      params: '^((?!dinov3).)*(?!.*(?:norm|bn|bias)).*$'
+      lr: 0.00005   # decoder 学习率
+
+  lr: 0.00005
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+lr_scheduler:
+  type: MultiStepLR
+  milestones: [100, ]
+  gamma: 0.1
+
+lr_warmup_scheduler:
+  warmup_duration: 5000  # ✅ 更长的 warmup
+  start_factor: 0.0001
+  end_factor: 1.0
+
+ema:
+  decay: 0.9999
+  warmup_steps: 2000
+
+epoches: 200
+
+use_amp: False  # ✅ 关闭混合精度，减少显存碎片
+
+clip_max_norm: 0.5  # ✅ 更强的梯度裁剪
+
+train_dataloader:
+  dataset:
+    transforms:
+      ops:
+        # ✅ 减小图像尺寸：640 → 448
+        - {type: Resize, size: [448, 448], }
+        - {type: RandomHorizontalFlip, }
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+  
+  # 半监督数据加载
+  sup_transforms:
+    ops:
+      # ✅ 监督数据也用 448
+      - {type: Resize, size: [448, 448]}
+      - {type: RandomHorizontalFlip, }
+      - {type: ConvertPILImage, dtype: 'float32', scale: True}
+      - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+  
+  weak_transforms:
+    ops:
+      # ✅ 弱增强也用 448
+      - {type: Resize, size: [448, 448]}
+      - {type: RandomHorizontalFlip, }
+      - {type: ConvertPILImage, dtype: 'float32', scale: True}
+      - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+  
+  strong_transforms:
+    ops:
+      # ✅ 强增强也用 448
+      - {type: Resize, size: [448, 448]}
+      - {type: RandomHorizontalFlip, }
+      # ❌ 暂时禁用 ColorJitter，因为它会产生 NaN
+      # - {type: ColorJitter, brightness: 0.3, contrast: 0.3, saturation: 0.3}
+      - {type: ConvertPILImage, dtype: 'float32', scale: True}
+      - {type: Normalize, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+  shuffle: True
+  total_batch_size: 1  # ✅ 保持 1
+  num_workers: 2
+
+DEIMCriterion:
+  matcher:
+    # change matcher
+    change_matcher: True
+    iou_order_alpha: 4.0
+    matcher_change_epoch: 100
+
+
+

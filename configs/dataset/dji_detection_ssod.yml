@@ -1,0 +1,86 @@
+task: ssod
+
+evaluator:
+  type: CocoEvaluator
+  iou_types: ['bbox', ]
+
+num_classes: 2  # 🔥 两个类别：0=small, 1=big
+remap_mscoco_category: False
+
+train_dataloader: 
+  type: DataLoader
+  dataset: 
+    type: CocoSemiLabeled
+    root: /data/DEIMv2/DJI_dataset/
+    img_folder_name: images
+    semi_ann_dir: annotations/semi_supervised
+    semi_name: train_full_two_categories.json
+    tag: sup
+    return_masks: False
+    transforms:
+      type: Compose
+      ops: ~
+  shuffle: True
+  total_batch_size: 3  # 🔥 必须能被 GPU 数量整除（3 GPUs: 3/3=1 per GPU）
+  num_workers: 4  # 🔥 恢复多进程数据加载
+  drop_last: True 
+  collate_fn:
+    type: BatchImageCollateFunction
+
+
+val_dataloader:
+  type: DataLoader
+  dataset: 
+    type: CocoDetection
+    img_folder: /data/DEIMv2/DJI_dataset/images/
+    ann_file: /data/DEIMv2/DJI_dataset/annotations/val_full_two_categories.json  # 🔥 使用全部标注数据作为验证集
+    return_masks: False
+    transforms:
+      type: Compose
+      ops: ~ 
+  shuffle: False
+  total_batch_size: 3  # 🔥 必须能被 GPU 数量整除（3 GPUs: 3/3=1 per GPU）
+  num_workers: 2  # 🔥 适中worker数量
+  pin_memory: True
+  drop_last: False
+  persistent_workers: False  # 验证阶段不保持 worker 进程，避免资源泄露
+  collate_fn:
+    type: BatchImageCollateFunction
+
+
+# 🔥 Semi-DETR 风格：使用 MultiBranch 在 DataLoader 层面生成 weak/strong 两个分支
+# 保证 Teacher 和 Student 看到的是同一张图像的不同增强版本
+unlabeled_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoSemiUnlabeledMultiBranch
+    root: /data/DEIMv2/DJI_dataset/
+    img_folder_name: images
+    use_image_info: True
+    image_list_ann: /data/DEIMv2/DJI_dataset/annotations/semi_supervised/train_unlabeled.json
+    return_dict: True  # 🔥 返回字典格式以支持 MultiBranchCollateFunction
+    # 🔥 Weak 增强（用于 Teacher）
+    weak_transforms:
+      type: WeakDetAug
+      size: 800
+      flip_p: 0.5
+      translate_percent: 0.125
+    # 🔥 Strong 增强（用于 Student）
+    strong_transforms:
+      type: StrongDetAug
+      size: 800
+      flip_p: 0.5
+      translate_percent: 0.125
+      randaug_n: 2
+      randaug_m: 10
+      cutout_n_holes: 1
+      cutout_length_ratio: 0.3
+  shuffle: True
+  total_batch_size: 12  # 🔥 必须能被 GPU 数量整除（3 GPUs: 12/3=4 per GPU），保持 1:4 比例
+  num_workers: 4  # 🔥 恢复多进程数据加载
+  drop_last: True
+  persistent_workers: False  # 🔥 禁用持久化 worker
+  pin_memory: True
+  collate_fn:
+    type: MultiBranchCollateFunction
+
